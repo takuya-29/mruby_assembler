@@ -85,8 +85,13 @@ class Binary
     end
 
     def make_literal_table(literal)
-        literal =~ /^;"*(.+[^"])"*$/
-        @literal_table.push($~[1])
+        if literal =~ /^;"(.+?)"$/ then
+            @literal_table.push($~[1])
+            return
+        end
+        if literal =~ /^;(.+)$/ then
+            @literal_table.push($~[1].to_f)
+        end
     end
 
     def make_table
@@ -471,12 +476,12 @@ class Binary
         for i in 0...@literal_table.size do
             if @literal_table[i].class == String then
                 @literal.push(0x00)
-            elsif @literal_table[i] == Float then
+            elsif @literal_table[i].class == Float then
                 @literal.push(0x02)
             else
                 @literal.push(0x01)
             end
-            @literal.push(bin_to_2bytes(@literal_table[i].size))
+            @literal.push(bin_to_2bytes(@literal_table[i].to_s.size))
             @literal_table[i].to_s.bytes {|x| @literal.push(x)}
         end
     end
@@ -565,8 +570,11 @@ end
 
 puts "file_name?"
 file = gets.chomp
-
+if /^.+\.rite$/=~ file then
 body = Binary.new(file)
+else
+    puts "error : extension"
+    exit
+end
 body.make_bin
 body.out_file
-
