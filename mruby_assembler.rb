@@ -7,12 +7,13 @@ COMPILER_VERSION = "0000"
 IREP_SECTION_ID = "IREP"
 IREP_VERSION = "0002"
 IREP_HEADER_SIZE = 12
+RECORD_LENGTH_BYTES = 4
 
 END_SECTION_ID = "END\0"
 
-class Binary
-    def initialize(file_name) 
-       @file_name = file_name
+class Mruby_bytecode
+    def initialize(file_name)
+        @file_name = file_name
     end
 
     def bin_to_2bytes(l)
@@ -58,6 +59,7 @@ class Binary
     def make_binary
         @binary = @header + @irep + @end
     end
+
     def make_header
         binary_id = BINARY_ID.bytes
         binay_version = BINARY_VERSION.bytes
@@ -65,176 +67,195 @@ class Binary
         compiler_version = COMPILER_VERSION.bytes
         binary_size = bin_to_4bytes(HEADER_SIZE + @irep.size + @end.size)
         compiler = compiler_name + compiler_version
-        crc = calc_crc_16_ccitt((binary_size + compiler + @irep + @end),0)
+        crc = calc_crc_16_ccitt((binary_size + compiler + @irep + @end) , 0)
         crc = bin_to_2bytes(crc)
         @header = binary_id + binay_version + crc + binary_size + compiler
     end
 
-    def make_symbol_table(symbol)
-        symbol =~ /^:(\$*\w+)$/
-        if @symbol_table == nil then
-            @symbol_table.push($~[1])
-        elsif
-            for i in 0...@symbol_table.size do
-                if @symbol_table[i] == $~[1] then
-                    return
-                end
+    def make_literal_table
+        @op_array[3] =~ /^;*"*(.+?)"*$/
+        if @op_array[0] == "OP_LOADL" then
+            n = $1
+            if n =~ /^\w+\.\w+$/ then
+                @literal_table[@irep_location].push(n.to_f)
+            else
+                @literal_table[@irep_location].push(n.to_i)
             end
-            @symbol_table.push($~[1])
+        else
+            @literal_table[@irep_location].push($1)
         end
     end
 
-    def make_literal_table(literal)
-        if literal =~ /^;"(.+?)"$/ then
-            @literal_table.push($~[1])
-            return
-        end
-        if literal =~ /^;(.+)$/ then
-            @literal_table.push($~[1].to_f)
+    def make_symbol_table(symbol)
+        symbol =~ /^(?:R\d)*:*(\$*\@*\w+)$/
+        index = @symbol_table[@irep_location].index($1)
+        if index == nil then
+            @symbol_table[@irep_location].push($1)
         end
     end
 
     def make_table
         @irep_name = []
+        irep_locaiton_hash = {}
         @label = {}
         @irep_location = -1
-        pc = 0
-        File.open(@file_name,"r") do |f|
+        @pc = []
+        @literal_table = []
+        @symbol_table = []
+
+        File.open(@file_name , "r") do |f|
             f.each_line do |line|
-                op_array = line.split
-                if line.chomp == "" then
-                    next
-                end
-
-                if op_array[0] =~ /^irep$/ then
+                @op_array = line.split
+                if @op_array[0] == "irep" then
                     @irep_location += 1
-                    if op_array[1] == nil then
-                        @irep_name.push(@irep_location-1)
-                    else
-                        @irep_name.push(op_array[1])
+                    @irep_name << []
+                    if @irep_location >= 1 then
+                        @irep_name[irep_locaiton_hash[@op_array[1]]].push(@op_array[1])
                     end
+                    @literal_table << []
+                    @symbol_table << []
+                    @pc.push(0)
                     next
                 end
 
-                if op_array[0] =~ /^(\w+):*$/
-                    @label[$~[1]] = pc 
+                if @op_array[0] =~ /^(\w+):$/
+                    @label[$1] = @pc[@irep_location]
+                    next 
                 end
-                pc += op_array.size
-                if op_array[0] == "OP_LOADL" then
-                    pc -= 1
-                end
-            end
-        end
-    end 
 
-    def fetch_operand(operand)
-        if operand =~ /^-*(\d+)$/ then
-            @iseq.push($~[1].to_i)
-        elsif operand =~ /^R(\d+)$/ then
-            @iseq.push($~[1].to_i)
-            if @nregs < $~[1].to_i then
-                @nregs = $~[1].to_i
-            end
-        elsif operand =~ /^L\((\d+)\)$/ then
-            make_literal_table(@op_array[3])
-            @iseq.push($~[1].to_i)
-        elsif operand =~ /^:(\$*\w+)$/ then
-            make_symbol_table(operand)
-            for i in 0...@symbol_table.size do
-                if @symbol_table[i] == $~[1] then
-                    @iseq.push(i)
+                case @op_array[0]
+                when "OP_LOADL" , "OP_STRING" , "OP_JMP" , "OP_ONERR" then
+                    @pc[@irep_location] += 3
+                when "OP_JMPIF" , "OP_JMPNOT" , "OP_JMPNIL" , "OP_ARGARY" , "OP_ENTER" , "OP_BLKPUSH" then
+                    @pc[@irep_location] += 4
+                else
+                    @pc[@irep_location] += @op_array.size
                 end
-            end
-        elsif operand =~ /^I\((\w+)\)/ then
-            for i in @irep_location...@irep_name.size do
-                if @irep_name[i] == $~[1] then
-                    @iseq.push(i - (@irep_location + 1))
+
+                if @op_array[0] == "OP_LAMBDA" || @op_array[0] == "OP_BLOCK" || @op_array[0] == "OP_METHOD" || @op_array[0] == "OP_EXEC" then
+                    @op_array[2] =~ /^I\((\w+)\)$/
+                    irep_locaiton_hash[$1] = @irep_location
+                end
+
+                case @op_array[0]
+                when "OP_LOADL" , "OP_STRING" , "OP_ERR" then
+                    self.make_literal_table
+                when "OP_SETGV" , "OP_SETIV" , "OP_SETSV" , "OP_SETCV" , "OP_SETCONST" , "OP_SETMCNST" , "OP_UNDEF" then
+                    self.make_symbol_table(@op_array[1])
+                when "OP_LOADSYM" , "OP_GETGV" , "OP_GETIV" , "OP_GETSV" , "OP_GETCV" , "OP_GETCONST" , "OP_GETMCNST" ,
+                     "OP_SEND" , "OP_SENDB" , "OP_SENDV" , "OP_SENDVB" , "OP_KEY_P" , "OP_KARG" , "OP_DEF" ,
+                     "OP_CLASS" , "OP_MODULE" then
+                     self.make_symbol_table(@op_array[2])
+                when "OP_ALIAS" then
+                    self.make_symbol_table(@op_array[1])
+                    self.make_symbol_table(@op_array[2])
                 end
             end
         end
     end
-
-    def fetch_z(op_code)
-        @iseq.push(op_code)
-        @pc += 1
-        @ilen += 1
+    
+    def write_z
     end
 
-    def fetch_b(op_code)
-        @iseq.push(op_code)
-        self.fetch_operand(@op_array[1])
-        @pc += 2
-        @ilen += 2
+    def write_b(opr)
+        case opr
+        when /^-*(\d+)$/ then
+            @iseq.push($1.to_i)
+        when /^R(\d+)$/ then
+            @iseq.push($1.to_i)
+            if @nregs < $1.to_i then
+                @nregs = $1.to_i
+            end
+        when /^L\((\d+)\)$/ then
+            @iseq.push($1.to_i)
+        when /^(?:R\d)*:*(\$*\@*\w+)$/ then
+            @iseq.push(@symbol_table[@irep_location].index($1))
+        when /^I\((\w+)\)/ then
+            @iseq.push(@irep_name[@irep_location].index($1))
+        end
     end
 
-    def fetch_bb(op_code)
-        @iseq.push(op_code)
-        self.fetch_operand(@op_array[1])
-        self.fetch_operand(@op_array[2])
-        @pc += 3
-        @ilen += 3
+    def write_bb
+        self.write_b(@op_array[1])
+        self.write_b(@op_array[2])
     end
 
-    def fetch_bbb(op_code)
-        @iseq.push(op_code)
-        self.fetch_operand(@op_array[1])
-        self.fetch_operand(@op_array[2])
-        self.fetch_operand(@op_array[3])
-        @pc += 4
-        @ilen += 4
+    def write_bbb
+        self.write_b(@op_array[1])
+        self.write_b(@op_array[2])
+        self.write_b(@op_array[3])
     end
 
-    def fetch_s(op_code)
-        @iseq.push(op_code)
-        @iseq.push(bin_to_2bytes(@label[@op_array[1]])).flatten!
-        @pc += 3
-        @ilen += 3
-    end
-
-    def fetch_bs(op_code)
-        @iseq.push(op_code)
-        self.fetch_operand(@op_array[1])
-        @iseq.push(bin_to_2bytes(@label[@op_array[2]])).flatten!
-        @pc += 4
-        @ilen += 4
-    end
-
-    def fetch_w(op_code)
-        @iseq.push(op_code)
+    def write_s(opr)
         arg = 0
+        if opr =~ /^(\d):(\d):(\d):(\d):*\(*(\d)\)*$/ || 
+            opr =~ /^{(?:req:(\d))*(?:,*rest:(\d))*(?:,*post:(\d))*(?:,*kdict:(\d))*(?:,*local:(\d))*}$/ then
+            req = $1.to_i
+            rest = $2.to_i
+            post = $3.to_i
+            kdict = $4.to_i
+            local = $5.to_i
 
-        if @op_array[1] =~ /^(\d):(\d):(\d):(\d):(\d):(\d):(\d)$/ then
-            req = $~[1].to_i
-            opt = $~[2].to_i
-            rest= $~[3].to_i
-            post = $~[4].to_i
-            key = $~[5].to_i
-            kdict = $~[6].to_i
-            block = $~[7].to_i
-        elsif @op_array[1] =~ /^{(?:req:(\d))*(?:,*opt:(\d))*(?:,*rest:(\d))*(?:,*post:(\d))*(?:,*key:(\d))*(?:,*kdict:(\d))*(?:,*block:(\d))*}$/ then
-            req = $~[1].to_i
-            opt = $~[2].to_i
-            rest= $~[3].to_i
-            post = $~[4].to_i
-            key = $~[5].to_i
-            kdict = $~[6].to_i
-            block = $~[7].to_i
+            arg |= (req << 11)
+            arg |= (rest << 10)
+            arg |= (post << 5)
+            arg |= (kdict << 4)
+            arg |= local
+            @iseq.concat(bin_to_2bytes(arg))
+        else
+            @iseq.concat(bin_to_2bytes(@label[opr]))
         end
-
-        arg |= (req << 18)
-        arg |= (opt << 13)
-        arg |= (rest << 12)
-        arg |= (post << 7)
-        arg |= (key << 2)
-        arg |= (kdict << 1)
-        arg |= block
-        @iseq.concat(bin_to_3bytes(arg))
-        @pc += 4
-        @ilen += 4
     end
 
-    def make_iseq_block
-        @pc = 0
+    def write_bs
+        self.write_b(@op_array[1])
+        self.write_s(@op_array[2])
+    end
+
+    def write_w(opr)
+        arg = 0
+        if opr =~ /^(\d):(\d):(\d):(\d):(\d):(\d):(\d)$/ ||
+            opr =~ /^{(?:req:(\d))*(?:,*opt:(\d))*(?:,*rest:(\d))*(?:,*post:(\d))*(?:,*key:(\d))*(?:,*kdict:(\d))*(?:,*block:(\d))*}$/ then
+            req = $1.to_i
+            opt = $2.to_i
+            rest= $3.to_i
+            post = $4.to_i
+            key = $5.to_i
+            kdict = $6.to_i
+            block = $7.to_i
+
+            arg |= (req << 18)
+            arg |= (opt << 13)
+            arg |= (rest << 12)
+            arg |= (post << 7)
+            arg |= (key << 2)
+            arg |= (kdict << 1)
+            arg |= block
+            @iseq.concat(bin_to_3bytes(arg))
+        end
+    end
+
+    def write_opr(opc,type)
+        @iseq.push(opc)
+        case type
+        when "Z" then
+            self.write_z
+        when "B" then
+            self.write_b(@op_array[1])
+        when "BB" then
+            self.write_bb
+        when "BBB" then
+            self.write_bbb
+        when "S" then
+            self.write_s(@op_array[1])
+        when "BS" then
+            self.write_bs
+        when "W" then
+            self.write_w(@op_array[1])
+        end 
+    end
+
+    def make_iseq
         @iseq = []
         @irep_location = -1
         @nloacals = 0
@@ -242,223 +263,346 @@ class Binary
         @add_regs = 1
         @rlen = 0
         @ilen = 0
-        @symbol_table = []
-        @literal_table = []
 
-        File.open(@file_name,"r") do |f|
+        File.open(@file_name , "r") do |f|
             f.each_line do |line|
-                @op_array = line.split(" ")
-                if @op_array[0] == "irep" then
+                @op_array = line.split
+
+                case @op_array[0] 
+                when "irep" then
                     self.make_record
-                    @pc = 0
                     @iseq = []
-                    @irep_location += 1
+                    @irep_location += 1 
                     @nloacals = 0
                     @nregs = 0
                     @add_regs = 1
                     @rlen = 0
                     @ilen = 0
-                    @symbol_table = []
-                    @literal_table = []
                     next
-                end
-                
-                case @op_array[0]
                 when "OP_NOP" then
-                    self.fetch_z(0x00)
+                    self.write_opr(0x00,"Z")
 
                 when "OP_MOVE" then
-                    self.fetch_bb(0x01)
+                    self.write_opr(0x01,"BB")
 
                 when "OP_LOADL" then
-                    self.fetch_bb(0x02)
+                    self.write_opr(0x02,"BB")
                     
                 when "OP_LOADI" then
-                    self.fetch_bb(0x03)
+                    self.write_opr(0x03,"BB")
 
                 when "OP_LOADINEG" then
-                    self.fetch_bb(0x04)
+                    self.write_opr(0x04,"BB")
 
                 when "OP_LOADI__1"
-                    self.fetch_b(0x05)
+                    self.write_opr(0x05,"B")
 
                 when "OP_LOADI_0" then
-                    self.fetch_b(0x06)
+                    self.write_opr(0x06,"B")
 
                 when "OP_LOADI_1" then
-                    self.fetch_b(0x07)
+                    self.write_opr(0x07,"B")
 
                 when "OP_LOADI_2" then
-                    self.fetch_b(0x08)
+                    self.write_opr(0x08,"B")
 
                 when "OP_LOADI_3" then
-                    self.fetch_b(0x09)
+                    self.write_opr(0x09,"B")
 
                 when "OP_LOADI_4" then
-                    self.fetch_b(0x0a)
+                    self.write_opr(0x0a,"B")
 
                 when "OP_LOADI_5" then
-                    self.fetch_b(0x0b)
+                    self.write_opr(0x0b,"B")
 
                 when "OP_LOADI_6" then
-                    self.fetch_b(0x0c)
+                    self.write_opr(0x0c,"B")
 
                 when "OP_LOADI_7" then
-                    self.fetch_b(0x0d)
+                    self.write_opr(0x0d,"B")
 
                 when "OP_LOADSYM" then
-                    self.fetch_bb(0x0e)
+                    self.write_opr(0x0e,"BB")
 
                 when "OP_LOADNIL" then
-                    self.fetch_b(0x0f)
+                    self.write_opr(0x0f,"B")
 
                 when "OP_LOADSELF" then
-                    self.fetch_b(0x10)
+                    self.write_opr(0x10,"B")
 
                 when "OP_LOADT" then
-                    self.fetch_b(0x11)
+                    self.write_opr(0x11,"B")
 
                 when "OP_LOADF" then
-                    self.fetch_b(0x12)
+                    self.write_opr(0x12,"B")
                 
                 when "OP_GETGV" then
-                    self.fetch_bb(0x13)
+                    self.write_opr(0x13,"BB")
                 
                 when "OP_SETGV" then  
                     @op_array[1] , @op_array[2] = @op_array[2] , @op_array[1]
-                    self.fetch_bb(0x14)
+                    self.write_opr(0x14,"BB")
+
+                when "OP_GETSV" then
+                    self.write_opr(0x15,"BB")
+
+                when "OP_SETSV" then
+                    @op_array[1] , @op_array[2] = @op_array[2] , @op_array[1]
+                    self.write_opr(0x16,"BB")
 
                 when "OP_GETIV" then
-                    self.fetch_bb(0x17)
+                    self.write_opr(0x17,"BB")
                 
                 when "OP_SETIV"  then
                     @op_array[1] , @op_array[2] = @op_array[2] , @op_array[1]
-                    self.fetch_bb(0x18)
+                    self.write_opr(0x18,"BB")
+
+                when "OP_GETCV" then
+                    self.write_opr(0x19,"BB")
+
+                when "OP_SETCV" then
+                    @op_array[1] , @op_array[2] = @op_array[2] , @op_array[1]
+                    self.write_opr(0x1a,"BB")
 
                 when "OP_GETCONST" then
-                    self.fetch_bb(0x1b)
+                    self.write_opr(0x1b,"BB")
                 
                 when "OP_SETCONST"  then
                     @op_array[1] , @op_array[2] = @op_array[2] , @op_array[1]
-                    self.fetch_bb(0x1c)
+                    self.write_opr(0x1c,"BB")
+
+                when "OP_GETMCNST" then
+                    self.write_opr(0x1d,"BB")
+
+                when "OP_SETMCNST" then
+                    @op_array[1] , @op_array[2] = @op_array[2] , @op_array[1]
+                    self.write_opr(0x1e,"BB")
 
                 when "OP_GETUPVAR" then
-                    self.fetch_bbb(0x1f)
+                    self.write_opr(0x1f,"BBB")
 
                 when "OP_SETUPVAR" then
-                    self.fetch_bbb(0x20)
+                    self.write_opr(0x20,"BBB")
 
                 when "OP_JMP" then
-                    self.fetch_s(0x21)
+                    self.write_opr(0x21,"S")
 
                 when "OP_JMPIF" then
-                    self.fetch_bs(0x22)
+                    self.write_opr(0x22,"BS")
 
                 when "OP_JMPNOT" then
-                    self.fetch_bs(0x23)
+                    self.write_opr(0x23,"BS")
 
                 when "OP_JMPNIL" then
-                    self.fetch_bs(0x24)
+                    self.write_opr(0x24,"BS")
+
+                when "OP_ONERR" then
+                    self.write_opr(0x25,"S")
+
+                when "OP_EXCEPT" then
+                    self.write_opr(0x26,"B")
+
+                when "OP_RESCUE" then
+                    self.write_opr(0x27,"BB")
+
+                when "OP_POPERR" then
+                    self.write_opr(0x28,"B")
+
+                when "OP_RAISE" then
+                    self.write_opr(0x29,"B") 
+
+                when "OP_EPUSH" then 
+                    @rlen += 1
+                    self.write_opr(0x2a,"B") then
+                    
+                when "OP_EPOP" then
+                    self.write_opr(0x2b,"B")
 
                 when "OP_SENDV" then
-                    self.fetch_bb(0x2c)
+                    self.write_opr(0x2c,"BB")
                     @add_regs += 1
 
                 when "OP_SEND" then   
-                    self.fetch_bbb(0x2e)
+                    self.write_opr(0x2e,"BBB")
                     @add_regs += 1
 
                 when "OP_SENDB" then
-                    self.fetch_bbb(0x2f)
+                    self.write_opr(0x2f,"BBB")
                     @add_regs += 1
-                    
+
+                when "OP_CALL" then
+                    self.write_opr(0x30,"Z")
+
+                when "OP_SUPER" then
+                    self.write_opr(0x31,"BB")
+
+                when "OP_ARGARY" then
+                    self.write_opr(0x32,"BS")
+                        
                 when "OP_ENTER" then
-                    self.fetch_w(0x33)
+                    self.write_opr(0x33,"W")
+
+                when "OP_KEY_P" then
+                    self.write_opr(0x34,"BB")
+
+                when "OP_KEYEND" then
+                    self.write_opr(0x35,"Z")
+                
+                when "OP_KARG" then
+                    self.write_opr(0x36,"BB") 
 
                 when "OP_RETURN" then
-                    self.fetch_b(0x37)
+                    self.write_opr(0x37,"B")
 
                 when "OP_RETURN_BLK" then
-                    self.fetch_b(0x38)
+                    self.write_opr(0x38,"B")
 
                 when "OP_BREAK" then
-                    self.fetch_b(0x39)
+                    self.write_opr(0x39,"B")
+
+                when "OP_BLKPUSH" then
+                    self.write_opr(0x3a,"BS")
 
                 when "OP_ADD" then
-                    self.fetch_b(0x3b)
+                    self.write_opr(0x3b,"B")
 
                 when "OP_ADDI" then
-                    self.fetch_bb(0x3c) 
+                    self.write_opr(0x3c,"BB") 
 
                 when "OP_SUB" then
-                    self.fetch_b(0x3d)
+                    self.write_opr(0x3d,"B")
 
                 when "OP_SUBI" then
-                    self.fetch_bb(0x3e)
+                    self.write_opr(0x3e,"BB")
 
                 when "OP_MUL" then
-                    self.fetch_b(0x3f)
+                    self.write_opr(0x3f,"B")
 
                 when "OP_DIV" then
-                    self.fetch_b(0x40)
+                    self.write_opr(0x40,"B")
 
                 when "OP_EQ" then
-                    self.fetch_b(0x41)
+                    self.write_opr(0x41,"B")
 
                 when "OP_LT" then
-                    self.fetch_b(0x42)
+                    self.write_opr(0x42,"B")
 
                 when "OP_LE" then
-                    self.fetch_b(0x43)
+                    self.write_opr(0x43,"B")
 
                 when "OP_GT" then
-                    self.fetch_b(0x44)
+                    self.write_opr(0x44,"B")
 
                 when "OP_GE" then
-                    self.fetch_b(0x45)
+                    self.write_opr(0x45,"B")
 
                 when "OP_ARRAY" then
-                    self.fetch_bb(0x46)
+                    self.write_opr(0x46,"BB")
                     
                 when "OP_ARRAY2" then
-                    self.fetch_bbb(0x47)
+                    self.write_opr(0x47,"BBB")
 
                 when "OP_ARYCAT" then
-                    self.fetch_b(0x48)
+                    self.write_opr(0x48,"B")
+
+                when "OP_ARYPUSH" then
+                    self.write_opr(0x49,"B")
 
                 when "OP_ARYDUP" then
-                    self.fetch_b(0x4a)
+                    self.write_opr(0x4a,"B")
 
                 when "OP_AREF" then
-                    self.fetch_bbb(0x4b)
+                    self.write_opr(0x4b,"BBB")
+
+                when "OP_ASET" then
+                    self.write_opr(0x4c,"BBB")
 
                 when "OP_APOST" then
-                    self.fetch_bbb(0x4d)
+                    self.write_opr(0x4d,"BBB")
                     
                 when "OP_INTERN" then
-                    self.fetch_b(0x4e)
- 
+                    self.write_opr(0x4e,"B")
+    
                 when "OP_STRING" then                
-                    self.fetch_bb(0x4f)
+                    self.write_opr(0x4f,"BB")
 
                 when "OP_STRCAT" then
-                    self.fetch_b(0x50)
+                    self.write_opr(0x50,"B")
 
                 when "OP_HASH" then
-                    self.fetch_bb(0x51)
- 
+                    self.write_opr(0x51,"BB")
+
+                when "OP_HASHADD" then
+                    self.write_opr(0x52,"BB")
+                
+                when "OP_HASHCAT" then
+                    self.write_opr(0x53,"B")
+
+                when "OP_LAMBDA" then
+                    @rlen += 1
+                    self.write_opr(0x54,"BB")
+
+                when "OP_BLOCK" then
+                    self.write_opr(0x55,"BB")
+    
                 when "OP_METHOD" then
                     @rlen += 1
-                    self.fetch_bb(0x56)
+                    self.write_opr(0x56,"BB")
+
+                when "OP_RANGE_INC" then
+                    self.write_opr(0x57,"B")
+
+                when "OP_RANGE_EXC" then
+                    self.write_opr(0x58,"B")
+
+                when "OP_OCLASS" then
+                    self.write_opr(0x59,"B")
+
+                when "OP_CLASS" then
+                    self.write_opr(0x5a,"BB")
+
+                when "OP_MODULE" then
+                    self.write_opr(0x5b,"BB")
+
+                when "OP_EXEC" then
+                    @rlen += 1
+                    self.write_opr(0x5c,"BB")
 
                 when "OP_DEF" then
-                    self.fetch_bb(0x5d)
+                    self.write_opr(0x5d,"BB")
+
+                when "OP_ALIAS" then
+                    self.write_opr(0x5e,"BB")
+
+                when "OP_UNDEF" then
+                    self.write_opr(0x5f,"B") 
+
+                when "OP_SCLASS" then
+                    self.write_opr(0x60,"B")
 
                 when "OP_TCLASS" then
-                    self.fetch_b(0x61)
+                    self.write_opr(0x61,"B")
+
+                when "OP_DEBUG" then
+                    self.write_opr(0x62,"BBB")
+
+                when "OP_ERR" then
+                    self.write_opr(0x63,"B")
+
+                when "OP_EXT1" then
+                    self.write_opr(0x64,"Z")
+
+                when "OP_EXT2" then
+                    self.write_opr(0x65,"Z")
+
+                when "OP_EXT3" then
+                    self.write_opr(0x66,"Z")
 
                 when "OP_STOP" then
-                    self.fetch_z(0x67)
+                    self.write_opr(0x67,"Z")
+
+                when "OP_ABORT" then
+                    self.write_opr(0x68,"Z")
                 end
             end
         end
@@ -466,62 +610,61 @@ class Binary
 
     def make_literal
         @literal = []
-        if @literal_table.empty? == true then
+        if @literal_table[@irep_location].empty? == true then
             @literal = bin_to_4bytes(0x00)
             return
         end
 
-        @literal = (bin_to_4bytes(@literal_table.size))
+        @literal = bin_to_4bytes(@literal_table[@irep_location].size)
 
-        for i in 0...@literal_table.size do
-            if @literal_table[i].class == String then
+        @literal_table[@irep_location].each do |a| 
+            if a.class == String then
                 @literal.push(0x00)
-            elsif @literal_table[i].class == Float then
-                @literal.push(0x02)
-            else
+            elsif a.class == Integer then
                 @literal.push(0x01)
+            elsif a.class == Float then
+                @literal.push(0x02)
             end
-            @literal.push(bin_to_2bytes(@literal_table[i].to_s.size))
-            @literal_table[i].to_s.bytes {|x| @literal.push(x)}
+            @literal.concat(bin_to_2bytes(a.to_s.size))
+            a.to_s.bytes {|x| @literal.push(x)}
         end
     end
-    
+
     def make_symbol
         @symbol = []
-        if @symbol_table.empty? == true then
-            @symbol = bin_to_4bytes(0x00)
-            return          
+        if @symbol_table[@irep_location].empty? == true  then 
+            @symbol_table = bin_to_4bytes(0x00)
+            return
         end
 
-        @symbol = (bin_to_4bytes(@symbol_table.size))
+        @symbol = bin_to_4bytes(@symbol_table[@irep_location].size)
 
-        for i in 0...@symbol_table.size do 
-            @symbol.concat(bin_to_2bytes(@symbol_table[i].size))
-            @symbol_table[i].to_s.bytes {|x| @symbol.push(x)}
+        @symbol_table[@irep_location].each do |a|
+            @symbol.concat(bin_to_2bytes(a.size))
+            a.bytes {|x| @symbol.push(x)}
             @symbol.push(0x00)
         end
     end
 
     def make_record
         if @iseq.empty? == true then
-            return 
+            return
         end
+        
+
         self.make_literal
         self.make_symbol
 
-        records =[]
-        record_length_bytes = 4
-
         @nloacals = bin_to_2bytes(@nloacals)
-        @nregs = bin_to_2bytes(@nregs+@add_regs)
+        @nregs = bin_to_2bytes(@nregs + @add_regs)
         @rlen = bin_to_2bytes(@rlen)
-        @ilen = bin_to_4bytes(@ilen)
-        
-        record_length = bin_to_4bytes(record_length_bytes + (@nloacals + @nregs + @rlen + @ilen + @iseq + @literal + @symbol).size)
+        @ilen = bin_to_4bytes(@pc[@irep_location])
 
-        @record.push(record_length).flatten!
+        record_length = bin_to_4bytes(RECORD_LENGTH_BYTES + (@record + @nloacals + @nregs + @rlen + @ilen + @iseq + @literal + @symbol).size)
+        @record.concat(record_length)
+        
         a = HEADER_SIZE + IREP_HEADER_SIZE + (@record + @nloacals + @nregs + @rlen + @ilen).size
-        @record.push(@nloacals,@nregs,@rlen,@ilen)
+        @record.concat(@nloacals,@nregs,@rlen,@ilen)
         if a % 4 == 1 then
             @record.push(0x00,0x00,0x00)
         elsif a % 4 == 2 then
@@ -529,13 +672,13 @@ class Binary
         elsif a % 4 == 3 then
             @record.push(0x00)
         end
-        @record.push(@iseq,@literal,@symbol).flatten!
 
+        @record.concat(@iseq + @literal + @symbol)
     end
 
     def make_irep
         @record = []
-        self.make_iseq_block
+        self.make_iseq
         self.make_record
 
         irep_section_id = IREP_SECTION_ID.bytes
@@ -553,7 +696,7 @@ class Binary
         @end = end_section_id + end_section_length
     end
 
-    def make_bin
+    def make_bytecode
         self.make_table
         self.make_irep
         self.make_end
@@ -571,10 +714,11 @@ end
 puts "file_name?"
 file = gets.chomp
 if /^.+\.rite$/=~ file then
-body = Binary.new(file)
+    body = Mruby_bytecode.new(file)
 else
     puts "error : extension"
     exit
 end
-body.make_bin
+
+body.make_bytecode
 body.out_file
