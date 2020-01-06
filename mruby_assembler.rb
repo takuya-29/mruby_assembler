@@ -413,7 +413,7 @@ class Mruby_bytecode
 
                 when "OP_EPUSH" then 
                     @rlen += 1
-                    self.write_opr(0x2a,"B") then
+                    self.write_opr(0x2a,"B") 
                     
                 when "OP_EPOP" then
                     self.write_opr(0x2b,"B")
