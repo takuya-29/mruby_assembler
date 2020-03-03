@@ -16,14 +16,14 @@ class Mruby_bytecode
         @file_name = file_name
     end
 
-    def bin_to_2bytes(l)
+    def byte2_to_bin(l)
         bin = []
         bin[0] = (l >> 8) & 0xff
         bin[1] = l & 0xff
         return bin
     end
 
-    def bin_to_3bytes(l)
+    def byte3_to_bin(l)
         bin = []
         bin[0] = (l >> 16) & 0xff
         bin[1] = (l >> 8) & 0xff
@@ -31,7 +31,7 @@ class Mruby_bytecode
         return bin
     end
 
-    def bin_to_4bytes(l)
+    def byte4_to_bin(l)
         bin = []
         bin[0] = (l >> 24) & 0xff
         bin[1] = (l >> 16) & 0xff
@@ -42,7 +42,6 @@ class Mruby_bytecode
 
     def calc_crc_16_ccitt(src,crc)
         crcwk = crc << 8
-        #src_ary = src.to_a
         src.each do |data|
             crcwk |= data
             for i in 0...8 do
@@ -50,14 +49,13 @@ class Mruby_bytecode
                 if(crcwk & 0x01000000)!= 0 then
                     crcwk ^= (0x11021 << 8)
                 end
-                #crcwk = crcwk & 0xffffffff
             end
         end
         return crcwk >> 8
     end
 
     def make_binary
-        @binary = @header + @irep + @end
+        @byte_code = @header + @irep + @end
     end
 
     def make_header
@@ -65,15 +63,15 @@ class Mruby_bytecode
         binay_version = BINARY_VERSION.bytes
         compiler_name = COMPILER_NAME.bytes
         compiler_version = COMPILER_VERSION.bytes
-        binary_size = bin_to_4bytes(HEADER_SIZE + @irep.size + @end.size)
+        binary_size = byte4_to_bin(HEADER_SIZE + @irep.size + @end.size)
         compiler = compiler_name + compiler_version
         crc = calc_crc_16_ccitt((binary_size + compiler + @irep + @end) , 0)
-        crc = bin_to_2bytes(crc)
+        crc = byte2_to_bin(crc)
         @header = binary_id + binay_version + crc + binary_size + compiler
     end
 
     def make_literal_table
-        @op_array[3] =~ /^;*"*(.+?)"*$/
+        @op_array[3] =~ /^;*"*(.*?)"*$/
         if @op_array[0] == "OP_LOADL" then
             n = $1
             if n =~ /^\w+\.\w+$/ then
@@ -123,6 +121,11 @@ class Mruby_bytecode
                     next 
                 end
 
+                if @irep_location == -1 then
+                    puts "error: nothing \"irep\" first line "
+                    exit
+                end
+
                 case @op_array[0]
                 when "OP_LOADL" , "OP_STRING" , "OP_JMP" , "OP_ONERR" then
                     @pc[@irep_location] += 3
@@ -149,7 +152,7 @@ class Mruby_bytecode
                 when "OP_ALIAS" then
                     self.make_symbol_table(@op_array[1])
                     self.make_symbol_table(@op_array[2])
-                end
+                end 
             end
         end
     end
@@ -160,29 +163,89 @@ class Mruby_bytecode
     def write_b(opr)
         case opr
         when /^-*(\d+)$/ then
-            @iseq.push($1.to_i)
+            if @ext1 == 1 then
+                @iseq.concat(byte2_to_bin($1.to_i))
+            else
+                @iseq.push($1.to_i)
+            end
+            
+            if @op_array[0] == "OP_SEND" || @op_array[0] == "OP_SENDB" then
+                if @nregs < @regs + $1.to_i + 1 then
+                    @nregs = @regs + $1.to_i + 1
+                end
+            elsif @op_array[0] == "OP_SENDV" 
+                if @nregs < @regs + 2 then
+                    @nregs = @regs + 2
+                end
+            elsif @op_array[0] == "OP_SENDVB" 
+                if @nregs < @regs + 3 then
+                    @nregs = @regs + 3
+                end 
+            end
+
         when /^R(\d+)$/ then
-            @iseq.push($1.to_i)
+            if @op_array[0] == "OP_SEND" || @op_array[0] == "OP_SENDB" || @op_array[0] == "OP_SENDV" || @op_array[0] == "OP_SENDVB" then
+                @regs = $1.to_i
+            end
+            if @ext1 == 1 then
+                @iseq.concat(byte2_to_bin($1.to_i))
+            else
+                @iseq.push($1.to_i)
+            end
             if @nregs < $1.to_i then
                 @nregs = $1.to_i
             end
+
         when /^L\((\d+)\)$/ then
-            @iseq.push($1.to_i)
+            if @ext1 == 1 then
+                @iseq.concat(byte2_to_bin($1.to_i))
+            else
+                @iseq.push($1.to_i)
+            end
+
         when /^(?:R\d)*:*(\$*\@*\w+)$/ then
-            @iseq.push(@symbol_table[@irep_location].index($1))
+            if @ext1 == 1 then
+                @iseq.concat(byte2_to_bin(@symbol_table[@irep_location].index($1)))
+            else
+                @iseq.push(@symbol_table[@irep_location].index($1))
+            end
         when /^I\((\w+)\)/ then
-            @iseq.push(@irep_name[@irep_location].index($1))
+            if @ext1 == 1 then
+                @iseq.concat(byte2_to_bin(@irep_name[@irep_location].index($1)))
+            else
+                @iseq.push(@irep_name[@irep_location].index($1))
+            end
+
+        when nil
+            puts "error:opr #{@op_array[0]} needs more operands "
+            exit
+        else 
+            puts "error:opr #{@line_num}line"
+            exit
         end
+        @ext1 = 0
     end
 
     def write_bb
         self.write_b(@op_array[1])
+        if @ext2 == 1 then
+            @ext1 = 1
+            @ext2 = 0
+        end
         self.write_b(@op_array[2])
     end
 
     def write_bbb
         self.write_b(@op_array[1])
+        if @ext2 == 1 then
+            @ext1 = 1
+            @ext2 = 0
+        end
         self.write_b(@op_array[2])
+        if @ext3 == 1 then
+            @ext1 = 1
+            @ext3 = 0
+        end
         self.write_b(@op_array[3])
     end
 
@@ -201,14 +264,21 @@ class Mruby_bytecode
             arg |= (post << 5)
             arg |= (kdict << 4)
             arg |= local
-            @iseq.concat(bin_to_2bytes(arg))
+            @iseq.concat(byte2_to_bin(arg))
+        elsif opr =~ /^\w+$/ then
+            @iseq.concat(byte2_to_bin(@label[opr]))
         else
-            @iseq.concat(bin_to_2bytes(@label[opr]))
+            puts "error:opr #{@line_num}line"
+            exit
         end
     end
 
     def write_bs
         self.write_b(@op_array[1])
+        if @ext2 == 1 then
+            @ext1 = 1
+            @ext2 = 0
+        end
         self.write_s(@op_array[2])
     end
 
@@ -231,7 +301,10 @@ class Mruby_bytecode
             arg |= (key << 2)
             arg |= (kdict << 1)
             arg |= block
-            @iseq.concat(bin_to_3bytes(arg))
+            @iseq.concat(byte3_to_bin(arg))
+        else
+            puts "error:opr #{@line_num}line"
+            exit
         end
     end
 
@@ -263,11 +336,13 @@ class Mruby_bytecode
         @add_regs = 1
         @rlen = 0
         @ilen = 0
+        @add_ilen = 0
+        @line_num = 0
 
         File.open(@file_name , "r") do |f|
             f.each_line do |line|
                 @op_array = line.split
-
+                @line_num += 1
                 case @op_array[0] 
                 when "irep" then
                     self.make_record
@@ -278,7 +353,15 @@ class Mruby_bytecode
                     @add_regs = 1
                     @rlen = 0
                     @ilen = 0
+                    @add_ilen = 0
                     next
+
+                when /^\w+:$/ then
+                    next
+
+                when nil then
+                    next
+                    
                 when "OP_NOP" then
                     self.write_opr(0x00,"Z")
 
@@ -420,15 +503,15 @@ class Mruby_bytecode
 
                 when "OP_SENDV" then
                     self.write_opr(0x2c,"BB")
-                    @add_regs += 1
+
+                when "OP_SENDVB" then
+                    self.write_opr(0x2d,"BB")
 
                 when "OP_SEND" then   
-                    self.write_opr(0x2e,"BBB")
-                    @add_regs += 1
+                    self.write_opr(0x2e,"BBB")  
 
                 when "OP_SENDB" then
                     self.write_opr(0x2f,"BBB")
-                    @add_regs += 1
 
                 when "OP_CALL" then
                     self.write_opr(0x30,"Z")
@@ -591,19 +674,30 @@ class Mruby_bytecode
 
                 when "OP_EXT1" then
                     self.write_opr(0x64,"Z")
+                    @ext1 = 1
+                    @add_ilen += 1
 
                 when "OP_EXT2" then
                     self.write_opr(0x65,"Z")
+                    @ext2 = 1
+                    @add_ilen += 1
 
                 when "OP_EXT3" then
                     self.write_opr(0x66,"Z")
+                    @ext3 = 1
+                    @add_ilen += 2
 
                 when "OP_STOP" then
                     self.write_opr(0x67,"Z")
 
                 when "OP_ABORT" then
                     self.write_opr(0x68,"Z")
+
+                else
+                    puts "error:opc #{@line_num}line"
+                    exit
                 end
+                @op_array = Array.new
             end
         end
     end
@@ -611,11 +705,11 @@ class Mruby_bytecode
     def make_literal
         @literal = []
         if @literal_table[@irep_location].empty? == true then
-            @literal = bin_to_4bytes(0x00)
+            @literal = byte4_to_bin(0x00)
             return
         end
 
-        @literal = bin_to_4bytes(@literal_table[@irep_location].size)
+        @literal = byte4_to_bin(@literal_table[@irep_location].size)
 
         @literal_table[@irep_location].each do |a| 
             if a.class == String then
@@ -625,7 +719,7 @@ class Mruby_bytecode
             elsif a.class == Float then
                 @literal.push(0x02)
             end
-            @literal.concat(bin_to_2bytes(a.to_s.size))
+            @literal.concat(byte2_to_bin(a.to_s.size))
             a.to_s.bytes {|x| @literal.push(x)}
         end
     end
@@ -633,14 +727,14 @@ class Mruby_bytecode
     def make_symbol
         @symbol = []
         if @symbol_table[@irep_location].empty? == true  then 
-            @symbol_table = bin_to_4bytes(0x00)
+            @symbol_table = byte4_to_bin(0x00)
             return
         end
 
-        @symbol = bin_to_4bytes(@symbol_table[@irep_location].size)
+        @symbol = byte4_to_bin(@symbol_table[@irep_location].size)
 
         @symbol_table[@irep_location].each do |a|
-            @symbol.concat(bin_to_2bytes(a.size))
+            @symbol.concat(byte2_to_bin(a.size))
             a.bytes {|x| @symbol.push(x)}
             @symbol.push(0x00)
         end
@@ -655,12 +749,12 @@ class Mruby_bytecode
         self.make_literal
         self.make_symbol
 
-        @nloacals = bin_to_2bytes(@nloacals)
-        @nregs = bin_to_2bytes(@nregs + @add_regs)
-        @rlen = bin_to_2bytes(@rlen)
-        @ilen = bin_to_4bytes(@pc[@irep_location])
+        @nloacals = byte2_to_bin(@nloacals)
+        @nregs = byte2_to_bin(@nregs + @add_regs)
+        @rlen = byte2_to_bin(@rlen)
+        @ilen = byte4_to_bin(@pc[@irep_location] + @add_ilen) 
 
-        record_length = bin_to_4bytes(RECORD_LENGTH_BYTES + (@record + @nloacals + @nregs + @rlen + @ilen + @iseq + @literal + @symbol).size)
+        record_length = byte4_to_bin(RECORD_LENGTH_BYTES + (@record + @nloacals + @nregs + @rlen + @ilen + @iseq + @literal + @symbol).size)
         @record.concat(record_length)
         
         a = HEADER_SIZE + IREP_HEADER_SIZE + (@record + @nloacals + @nregs + @rlen + @ilen).size
@@ -682,7 +776,7 @@ class Mruby_bytecode
         self.make_record
 
         irep_section_id = IREP_SECTION_ID.bytes
-        irep_section_length = bin_to_4bytes(IREP_HEADER_SIZE + @record.size)
+        irep_section_length = byte4_to_bin(IREP_HEADER_SIZE + @record.size)
         irep_version = IREP_VERSION.bytes
         irep_header = irep_section_id + irep_section_length + irep_version
 
@@ -692,7 +786,7 @@ class Mruby_bytecode
     def make_end
         end_section_length_bytes = 4
         end_section_id =  END_SECTION_ID.bytes
-        end_section_length = bin_to_4bytes(end_section_id.size + end_section_length_bytes)
+        end_section_length = byte4_to_bin(end_section_id.size + end_section_length_bytes)
         @end = end_section_id + end_section_length
     end
 
@@ -706,7 +800,7 @@ class Mruby_bytecode
 
     def out_file
         File.open(@file_name.gsub(/\.\w+$/,".mrb"),"wb") do |fb|
-            fb.write(@binary.pack("C*"))
+            fb.write(@byte_code.pack("C*"))
         end
     end
 end
@@ -716,7 +810,7 @@ file = gets.chomp
 if /^.+\.rite$/=~ file then
     body = Mruby_bytecode.new(file)
 else
-    puts "error : extension"
+    puts "error: extension"
     exit
 end
 
